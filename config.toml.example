@@ -1,0 +1,5 @@
+# auth0 configuration — copy to config.toml and edit.
+
+[server]
+host = "0.0.0.0"
+port = 0    # 0 → next available port ≥ 69 (PORT env also works)
