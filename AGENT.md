@@ -31,13 +31,13 @@ cargo run --release
 # or
 sudo ./deploy.sh        # skips cargo build & service restart when only static/ changed
 sudo ./deploy.sh -f     # force full rebuild & restart
-journalctl -u auth0 -f
+journalctl -u auth0-demo -f
 ```
 
 ## API
 
 ```
-GET /health   → {"status":"ok","service":"auth0","port":N}
+GET /health   → {"status":"ok","service":"auth0-demo","port":N}
 ```
 
 ## Config

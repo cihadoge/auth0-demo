@@ -5,7 +5,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SERVICE_NAME="auth0"
+SERVICE_NAME="auth0-demo"
 APP_DIR="/opt/auth0"
 CONF_DIR="/etc/auth0"
 CONF="$CONF_DIR/config.toml"
@@ -38,7 +38,7 @@ compute_main_hash() {
     rustc --version 2>/dev/null || true
     (
       cd "$ROOT"
-      find Cargo.toml Cargo.lock rust-toolchain.toml build.rs src -type f -print0 2>/dev/null \
+      find Cargo.toml Cargo.lock rust-toolchain.toml src -type f -print0 2>/dev/null \
         | LC_ALL=C sort -z \
         | xargs -0 sha256sum
     )
@@ -133,16 +133,18 @@ else
   echo "==> keeping existing $CONF"
 fi
 
-OLD_UNIT=""
-[ -f "$UNIT" ] && OLD_UNIT="$(cat "$UNIT")"
 echo "==> writing systemd unit $UNIT"
+# Build the unit in a temp file first so we can compare against the installed
+# unit without touching its mtime when nothing changed (avoids spurious
+# "changed on disk" warnings from systemctl).
+UNIT_TMP="$(mktemp)"
 # The Description carries the project's free-text description, so it is written
 # through a quoted delimiter: the shell expands nothing the scaffolder
 # substituted into it. The remainder needs $APP_DIR/$CONF, hence a plain heredoc.
 {
   cat <<'UNIT_HEAD'
 [Unit]
-Description=auth0 - auth0 demo integration with cloudflare tunnel
+Description=auth0-demo - auth0 demo integration with cloudflare tunnel
 UNIT_HEAD
   cat <<UNIT_BODY
 After=network-online.target
@@ -161,16 +163,21 @@ NoNewPrivileges=true
 [Install]
 WantedBy=multi-user.target
 UNIT_BODY
-} > "$UNIT"
+} > "$UNIT_TMP"
 
-if [ "$(cat "$UNIT")" != "$OLD_UNIT" ]; then
-  systemctl daemon-reload
-  systemctl enable "$SERVICE_NAME.service" >/dev/null
-  NEED_RESTART=1
-else
+if [ -f "$UNIT" ] && cmp -s "$UNIT_TMP" "$UNIT"; then
+  rm -f "$UNIT_TMP"
+  chmod 644 "$UNIT"
+  echo "==> systemd unit unchanged"
   if ! systemctl is-enabled --quiet "$SERVICE_NAME.service" 2>/dev/null; then
     systemctl enable "$SERVICE_NAME.service" >/dev/null
   fi
+else
+  chmod 644 "$UNIT_TMP"
+  mv -f "$UNIT_TMP" "$UNIT"
+  systemctl daemon-reload
+  systemctl enable "$SERVICE_NAME.service" >/dev/null
+  NEED_RESTART=1
 fi
 
 RUNNING_HASH_FILE="$APP_DIR/.running-main-hash"

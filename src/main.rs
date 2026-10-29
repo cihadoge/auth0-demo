@@ -146,7 +146,8 @@ struct Session {
 struct AppState {
     port: u16,
     name: &'static str,
-    cfg: config::Auth0Cfg,
+    cfg: Mutex<config::Auth0Cfg>,
+    config_path: Option<std::path::PathBuf>,
     client: reqwest::Client,
     sessions: Mutex<HashMap<String, Session>>,
     pending: Mutex<HashMap<String, u64>>,
@@ -197,17 +198,34 @@ fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+fn first_forwarded(v: &str) -> &str {
+    v.split(',').next().unwrap_or(v).trim()
+}
+
 fn base_url(headers: &HeaderMap) -> String {
     let host = headers
         .get("x-forwarded-host")
         .or_else(|| headers.get(header::HOST))
         .and_then(|v| v.to_str().ok())
+        .map(first_forwarded)
         .unwrap_or("localhost")
         .to_string();
     let proto = headers
         .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
+        .map(first_forwarded)
         .map(|s| s.to_string())
+        .or_else(|| {
+            headers
+                .get("cf-visitor")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| {
+                    // CF-Visitor: {"scheme":"https"}
+                    s.find("\"scheme\"").and_then(|_| {
+                        if s.contains("https") { Some("https".to_string()) } else { Some("http".to_string()) }
+                    })
+                })
+        })
         .unwrap_or_else(|| {
             if host.starts_with("localhost") || host.starts_with("127.") {
                 "http".to_string()
@@ -227,10 +245,29 @@ fn get_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
 }
 
 fn is_secure(headers: &HeaderMap) -> bool {
-    headers
+    let proto = headers
         .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
-        == Some("https")
+        .map(first_forwarded)
+        .or_else(|| {
+            headers
+                .get("cf-visitor")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| if s.contains("https") { "https" } else { "http" })
+        })
+        .unwrap_or_else(|| {
+            if headers
+                .get(header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .map(|h| h.starts_with("localhost") || h.starts_with("127."))
+                .unwrap_or(true)
+            {
+                "http"
+            } else {
+                "https"
+            }
+        });
+    proto == "https"
 }
 
 async fn index() -> Html<axum::body::Bytes> {
@@ -282,12 +319,52 @@ async fn sw() -> Response {
 }
 
 async fn health(State(st): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let cfg = st.cfg.lock().unwrap().clone();
     Json(json!({
         "status": "ok",
         "service": st.name,
         "port": st.port,
-        "auth0_configured": !st.cfg.domain.is_empty() && !st.cfg.client_id.is_empty(),
+        "auth0_configured": !cfg.domain.is_empty() && !cfg.client_id.is_empty(),
     }))
+}
+
+
+async fn get_config(State(st): State<Arc<AppState>>) -> Response {
+    let path = st.config_path.clone().unwrap_or_else(|| std::path::PathBuf::from("config.toml"));
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    Json(json!({
+        "path": path.display().to_string(),
+        "content": content,
+    })).into_response()
+}
+
+async fn post_config(State(st): State<Arc<AppState>>, body: axum::body::Bytes) -> Response {
+    // Accept either JSON { "content": "..." } or a raw TOML body.
+    let content = if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body) {
+        v.get("content")
+            .or_else(|| v.get("config"))
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| String::from_utf8_lossy(&body).to_string())
+    } else {
+        String::from_utf8_lossy(&body).to_string()
+    };
+
+    let path = st.config_path.clone().unwrap_or_else(|| std::path::PathBuf::from("config.toml"));
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&path, &content) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+    }
+    // Best-effort reload into running state.
+    if let Ok(new_cfg) = toml::from_str::<config::Config>(&content) {
+        *st.cfg.lock().unwrap() = new_cfg.auth0;
+    }
+    Json(json!({
+        "status": "ok",
+        "path": path.display().to_string(),
+    })).into_response()
 }
 
 async fn not_found() -> StatusCode {
@@ -303,21 +380,22 @@ struct CallbackParams {
 }
 
 async fn login(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if st.cfg.domain.is_empty() || st.cfg.client_id.is_empty() {
+    let cfg = st.cfg.lock().unwrap().clone();
+    if cfg.domain.is_empty() || cfg.client_id.is_empty() {
         return (StatusCode::SERVICE_UNAVAILABLE, "Auth0 not configured").into_response();
     }
     let state = Uuid::new_v4().to_string();
     st.pending.lock().unwrap().insert(state.clone(), now());
     let redirect_uri = format!("{}/callback", base_url(&headers));
-    let mut url = url::Url::parse(&format!("https://{}/authorize", st.cfg.domain)).unwrap();
+    let mut url = url::Url::parse(&format!("https://{}/authorize", cfg.domain)).unwrap();
     url.query_pairs_mut()
         .append_pair("response_type", "code")
-        .append_pair("client_id", &st.cfg.client_id)
+        .append_pair("client_id", &cfg.client_id)
         .append_pair("redirect_uri", &redirect_uri)
-        .append_pair("scope", &st.cfg.scopes)
+        .append_pair("scope", &cfg.scopes)
         .append_pair("state", &state);
-    if !st.cfg.audience.is_empty() {
-        url.query_pairs_mut().append_pair("audience", &st.cfg.audience);
+    if !cfg.audience.is_empty() {
+        url.query_pairs_mut().append_pair("audience", &cfg.audience);
     }
     Redirect::temporary(url.as_str()).into_response()
 }
@@ -327,6 +405,7 @@ async fn callback(
     headers: HeaderMap,
     Query(q): Query<CallbackParams>,
 ) -> Response {
+    let cfg = st.cfg.lock().unwrap().clone();
     if let Some(err) = q.error {
         let desc = q.error_description.unwrap_or_default();
         return (StatusCode::BAD_REQUEST, format!("auth error: {err} {desc}")).into_response();
@@ -348,7 +427,7 @@ async fn callback(
         }
     }
     let redirect_uri = format!("{}/callback", base_url(&headers));
-    let token_url = format!("https://{}/oauth/token", st.cfg.domain);
+    let token_url = format!("https://{}/oauth/token", cfg.domain);
     let res = st
         .client
         .post(&token_url)
@@ -356,8 +435,8 @@ async fn callback(
             ("grant_type", "authorization_code"),
             ("code", code.as_str()),
             ("redirect_uri", redirect_uri.as_str()),
-            ("client_id", st.cfg.client_id.as_str()),
-            ("client_secret", st.cfg.client_secret.as_str()),
+            ("client_id", cfg.client_id.as_str()),
+            ("client_secret", cfg.client_secret.as_str()),
         ])
         .send()
         .await;
@@ -378,7 +457,7 @@ async fn callback(
     let id_token = token_json.get("id_token").and_then(|v| v.as_str()).map(|s| s.to_string());
 
     // get userinfo
-    let userinfo_url = format!("https://{}/userinfo", st.cfg.domain);
+    let userinfo_url = format!("https://{}/userinfo", cfg.domain);
     let user = if !access_token.is_empty() {
         match st.client.get(&userinfo_url).bearer_auth(&access_token).send().await {
             Ok(r) if r.status().is_success() => r.json().await.unwrap_or_else(|_| json!({})),
@@ -410,6 +489,7 @@ async fn callback(
 }
 
 async fn logout(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let cfg = st.cfg.lock().unwrap().clone();
     // clear session
     if let Some(sid) = get_cookie(&headers, "session") {
         st.sessions.lock().unwrap().remove(&sid);
@@ -417,11 +497,11 @@ async fn logout(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response
     let return_to = base_url(&headers);
     let logout_url = format!(
         "https://{}/v2/logout?client_id={}&returnTo={}",
-        st.cfg.domain,
-        st.cfg.client_id,
+        cfg.domain,
+        cfg.client_id,
         urlencoding_simple(&return_to)
     );
-    let mut resp = if !st.cfg.domain.is_empty() {
+    let mut resp = if !cfg.domain.is_empty() {
         Redirect::temporary(&logout_url).into_response()
     } else {
         Redirect::temporary("/").into_response()
@@ -471,11 +551,13 @@ async fn token(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response 
 async fn main() {
     let cfg = config::Config::load();
     let host = cfg.server.host.clone();
+    let config_path = config::Config::resolve_path();
     let (listener, port) = bind_listener(&host, cfg.server.port).await;
     let st = Arc::new(AppState {
         port,
-        name: "auth0",
-        cfg: cfg.auth0,
+        name: "auth0-demo",
+        cfg: Mutex::new(cfg.auth0),
+        config_path,
         client: reqwest::Client::new(),
         sessions: Mutex::new(HashMap::new()),
         pending: Mutex::new(HashMap::new()),
@@ -488,6 +570,8 @@ async fn main() {
         .route("/manifest.webmanifest", get(manifest))
         .route("/sw.js", get(sw))
         .route("/health", get(health))
+        .route("/api/config", get(get_config).post(post_config))
+        .route("/config", get(get_config).post(post_config))
         .route("/login", get(login))
         .route("/callback", get(callback))
         .route("/logout", get(logout))
@@ -497,7 +581,7 @@ async fn main() {
         .with_state(st)
         .layer(CompressionLayer::new());
 
-    println!("auth0 listening on http://{host}:{port}");
+    println!("auth0-demo listening on http://{host}:{port}");
     let listener = axum::serve(listener, app);
     tokio::select! {
         res = listener => {

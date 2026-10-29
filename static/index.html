@@ -13,12 +13,23 @@
     <h1>auth0</h1>
     <p class="sub">auth0 demo integration with cloudflare tunnel</p>
     <p id="status" class="status">…</p>
-    <section id="auth" style="margin-top:1.5rem;">
-      <a id="login" href="/login" style="display:none;">Log in</a>
-      <a id="logout" href="/logout" style="display:none;">Log out</a>
-      <pre id="user" style="white-space:pre-wrap;word-break:break-word;font-size:0.85rem;color:var(--muted);"></pre>
-    </section>
-  </main>
+  <section id="auth" style="margin-top:1.5rem;">
+    <button id="login" style="display:none;" onclick="window.client.loginWithRedirect()">Log in</button>
+    <button id="signup" style="display:none;" onclick="window.client.loginWithRedirect({authorizationParams:{screen_hint:'signup'}})">Sign up</button>
+    <button id="logout" style="display:none;" onclick="window.client.logout({logoutParams:{returnTo:location.origin}})">Log out</button>
+    <pre id="user" style="white-space:pre-wrap;word-break:break-word;font-size:0.85rem;color:var(--muted);"></pre>
+  </section>
+  <section id="config" style="margin-top:1.5rem;">
+    <h2>Config</h2>
+    <textarea id="configEditor" rows="14" cols="72" style="width:100%;font-family:monospace;"></textarea>
+    <div style="margin-top:0.5rem;">
+      <button onclick="loadConfig()">Load</button>
+      <button onclick="saveConfig()">Save</button>
+    </div>
+    <pre id="configStatus" style="white-space:pre-wrap;word-break:break-word;font-size:0.85rem;color:var(--muted);"></pre>
+  </section>
+</main>
+  <script src="https://cdn.auth0.com/js/auth0-spa-js/2.18/auth0-spa-js.production.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

@@ -72,10 +72,14 @@ impl Config {
         if let Ok(v) = std::env::var("AUTH0_SCOPES") {
             cfg.auth0.scopes = v;
         }
+        // normalize domain: strip scheme and trailing slash
+        let d = cfg.auth0.domain.trim().trim_end_matches('/').to_string();
+        let d = d.trim_start_matches("https://").trim_start_matches("http://").to_string();
+        cfg.auth0.domain = d.trim_end_matches('/').to_string();
         cfg
     }
 
-    fn resolve_path() -> Option<PathBuf> {
+    pub fn resolve_path() -> Option<PathBuf> {
         if let Some(p) = std::env::args().skip_while(|a| a != "--config").nth(1) {
             return Some(PathBuf::from(p));
         }
