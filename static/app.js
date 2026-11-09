@@ -22,6 +22,7 @@
       domain: 'dev-4vyek1k3zl2ztjsc.eu.auth0.com',
       clientId: '3gycR4ltgdYCsKPtOCK4HNiHwx2IaKdF',
       authorizationParams: { redirect_uri: location.origin },
+      cacheLocation: 'localstorage',
     });
 
     if (location.search.includes('error=')) {

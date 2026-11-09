@@ -203,17 +203,26 @@ fn first_forwarded(v: &str) -> &str {
 }
 
 fn base_url(headers: &HeaderMap) -> String {
-    let host = headers
+    let raw_host = headers
         .get("x-forwarded-host")
         .or_else(|| headers.get(header::HOST))
         .and_then(|v| v.to_str().ok())
         .map(first_forwarded)
-        .unwrap_or("localhost")
+        .filter(|s| !s.is_empty())
+        .unwrap_or("localhost");
+    // Strip default ports so the reconstructed URL/host matches the
+    // reverse proxy's server name (avoids 421 Misdirected Request).
+    let host = raw_host
+        .strip_suffix(":443")
+        .or_else(|| raw_host.strip_suffix(":80"))
+        .unwrap_or(raw_host)
         .to_string();
     let proto = headers
         .get("x-forwarded-proto")
+        .or_else(|| headers.get("x-forwarded-scheme"))
         .and_then(|v| v.to_str().ok())
         .map(first_forwarded)
+        .filter(|s| *s == "http" || *s == "https")
         .map(|s| s.to_string())
         .or_else(|| {
             headers
@@ -247,13 +256,16 @@ fn get_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
 fn is_secure(headers: &HeaderMap) -> bool {
     let proto = headers
         .get("x-forwarded-proto")
+        .or_else(|| headers.get("x-forwarded-scheme"))
         .and_then(|v| v.to_str().ok())
         .map(first_forwarded)
+        .filter(|s| *s == "http" || *s == "https")
+        .map(|s| s.to_string())
         .or_else(|| {
             headers
                 .get("cf-visitor")
                 .and_then(|v| v.to_str().ok())
-                .map(|s| if s.contains("https") { "https" } else { "http" })
+                .map(|s| if s.contains("https") { "https".to_string() } else { "http".to_string() })
         })
         .unwrap_or_else(|| {
             if headers
@@ -262,9 +274,9 @@ fn is_secure(headers: &HeaderMap) -> bool {
                 .map(|h| h.starts_with("localhost") || h.starts_with("127."))
                 .unwrap_or(true)
             {
-                "http"
+                "http".to_string()
             } else {
-                "https"
+                "https".to_string()
             }
         });
     proto == "https"
@@ -317,6 +329,7 @@ async fn sw() -> Response {
     )
         .into_response()
 }
+
 
 async fn health(State(st): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let cfg = st.cfg.lock().unwrap().clone();

@@ -1,5 +1,5 @@
 /* Shell-only precache (non-atomic). Never cache /api/* or /health. */
-const CACHE = 'auth0-v1';
+const CACHE = 'auth0-v2';
 const SHELL = ['/', '/style.css', '/app.js', '/manifest.webmanifest'];
 
 self.addEventListener('install', (e) => {
